@@ -4,7 +4,7 @@ Chat-first corporate contract workspace for Capco / Wipro legal operations. Capc
 
 Visual language follows [Capco Wealth & Asset Management](https://www.capco.com/Industries/wealth-and-asset-management): black architectural surfaces, Baskerville display type, clean sans UI.
 
-**Repo:** [github.com/alanyoungcy/legalassits](https://github.com/alanyoungcy/legalassits)
+**Repo:** [github.com/alancapco/legalassists](https://github.com/alancapco/legalassists)
 
 ---
 
@@ -189,8 +189,8 @@ flowchart LR
 ### 1. Clone
 
 ```bash
-git clone https://github.com/alanyoungcy/legalassits.git
-cd legalassits
+git clone https://github.com/alancapco/legalassists.git
+cd legalassists
 ```
 
 ### 2. Environment
