@@ -4,6 +4,7 @@ export type AssignableField = {
   key: string;
   label: string;
   placeholder: string;
+  sample_context?: string | null;
 };
 
 function escapeRegExp(value: string) {
@@ -18,7 +19,22 @@ function cleanValue(raw: string) {
     .trim();
 }
 
-/** Prefer fenced ```fields blocks; also accept `key: value` lines. */
+function isPlaceholderEcho(val: string, field: AssignableField): boolean {
+  const v = val.trim();
+  if (!v) return true;
+  if (/^(\(empty\)|\(not provided\)|\(unknown\)|tbd|to be determined|null|undefined|<empty>)$/i.test(v)) {
+    return true;
+  }
+  if (
+    v.toLowerCase() === (field.placeholder || "").trim().toLowerCase() ||
+    v.toLowerCase() === `[${(field.label || "").trim().toLowerCase()}]`
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/** Prefer fenced ```fields blocks; supports single-line and multi-line bullet values. */
 export function parseAssignedValues(
   reply: string,
   fields: AssignableField[],
@@ -26,39 +42,77 @@ export function parseAssignedValues(
   const next: Record<string, string> = {};
   if (!reply.trim() || !fields.length) return next;
 
-  let body = reply;
-  const fenced = reply.match(/```fields\s*([\s\S]*?)```/i);
-  if (fenced?.[1]) body = fenced[1];
+  const fencedMatches = Array.from(reply.matchAll(/```fields\s*([\s\S]*?)```/gi));
+  const hasFenced = fencedMatches.length > 0;
+  const body = hasFenced ? fencedMatches.map((m) => m[1]).join("\n") : reply;
 
-  const lines = body.split(/\r?\n/);
+  // Map normalized alias -> field
+  const aliasEntries: Array<{ regex: RegExp; field: AssignableField }> = [];
   for (const field of fields) {
-    const aliases = [field.key, field.label, field.placeholder].filter(Boolean);
+    const aliases = Array.from(
+      new Set([field.key, field.label, field.placeholder].filter(Boolean)),
+    );
     for (const alias of aliases) {
-      const keyRe = new RegExp(
-        `^(?:[-*•]\\s*)?(?:\\*\\*)?(${escapeRegExp(alias)})(?:\\*\\*)?\\s*[:=]\\s*(.+)$`,
-        "i",
-      );
-      for (const line of lines) {
-        const match = line.trim().match(keyRe);
-        if (match?.[2]) {
-          const value = cleanValue(match[2]);
-          if (value && !/^\(empty\)$/i.test(value) && value !== "NA") {
-            next[field.key] = value;
-          }
-          break;
-        }
-      }
-      if (next[field.key]) break;
+      aliasEntries.push({
+        regex: new RegExp(
+          `^(?:[-*•]\\s*)?(?:\\*\\*|\`)?${escapeRegExp(alias)}(?:\\*\\*|\`)?\\s*[:=]\\s*(.*)$`,
+          "i",
+        ),
+        field,
+      });
     }
   }
-  return next;
-}
 
-export function nextEmptyField(
-  fields: AssignableField[],
-  values: Record<string, string>,
-): AssignableField | null {
-  return fields.find((f) => !(values[f.key] || "").trim()) || null;
+  const lines = body.split(/\r?\n/);
+  let currentField: AssignableField | null = null;
+  let currentParts: string[] = [];
+
+  const flush = () => {
+    if (!currentField || !currentParts.length) {
+      currentField = null;
+      currentParts = [];
+      return;
+    }
+    const joined = cleanValue(currentParts.join(" "));
+    if (joined && !isPlaceholderEcho(joined, currentField) && joined !== "NA") {
+      next[currentField.key] = joined;
+    }
+    currentField = null;
+    currentParts = [];
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) {
+      flush();
+      continue;
+    }
+
+    let matchedField: AssignableField | null = null;
+    let remainder = "";
+    for (const entry of aliasEntries) {
+      const m = line.match(entry.regex);
+      if (m) {
+        matchedField = entry.field;
+        remainder = m[1] || "";
+        break;
+      }
+    }
+
+    if (matchedField) {
+      flush();
+      currentField = matchedField;
+      const cleaned = cleanValue(remainder);
+      if (cleaned) currentParts.push(cleaned);
+    } else if (hasFenced && currentField) {
+      // Multi-line continuation inside ```fields block (e.g. bullet items)
+      const cont = cleanValue(line);
+      if (cont) currentParts.push(cont);
+    }
+  }
+  flush();
+
+  return next;
 }
 
 export function followUpPrompt(

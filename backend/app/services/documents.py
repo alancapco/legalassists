@@ -1,4 +1,4 @@
-"""Uploaded document store for review / assessment workflow."""
+"""Uploaded document store for review / assessment / completion workflow."""
 
 from __future__ import annotations
 
@@ -13,12 +13,12 @@ from fastapi import UploadFile
 from app.config import Settings, get_settings
 from app.services.docx_package import enrich_docx_for_editor
 from app.services.editor_content import docx_to_blocks
+from app.services.field_discovery import prepare_template_fields
 
 
 def _display_title(filename: str | None, fallback: str) -> str:
     raw = (filename or "").strip() or fallback
     stem = Path(raw).stem.strip() or fallback
-    # Prefer human filename; tidy separators without mangling IDs wrongly
     cleaned = re.sub(r"[\s_]+", " ", stem).strip()
     return cleaned or fallback
 
@@ -46,12 +46,31 @@ class DocumentStore:
     def get(self, document_id: str) -> dict | None:
         return self._items.get(document_id)
 
+    def refresh_from_disk(self, document_id: str) -> dict | None:
+        """Re-scan an uploaded document after AI field discovery updates its .docx on disk."""
+        row = self._items.get(document_id)
+        if not row:
+            return None
+        path = Path(row["path"])
+        if not path.exists():
+            return row
+        editor = docx_to_blocks(path)
+        row["updated_at"] = datetime.now(timezone.utc).isoformat()
+        row["plain_text"] = editor.get("plain_text") or ""
+        row["blocks"] = editor.get("blocks") or []
+        row["fields"] = editor.get("fields") or []
+        row["field_count"] = len(row["fields"])
+        self._save()
+        return row
+
     async def save_upload(self, upload: UploadFile, *, mode: str = "review") -> dict:
         """
         Persist an uploaded .docx for workspace open.
 
-        Assessment / review uploads keep the ORIGINAL bytes (no yellow-field rewrite).
-        Template yellow discovery belongs on template catalog upload only.
+        - Assessment uploads (`mode == "assess"` or `"extract"`) keep the ORIGINAL bytes unchanged.
+        - Completion / draft / template-style uploads (`mode in {"complete", "draft", "fill", "sign"}`)
+          run `prepare_template_fields(..., use_ai=True)` so all blanks, tables, and variables are
+          automatically identified and yellow-highlighted for Capco Wayne.
         """
         original_name = upload.filename or "document.docx"
         suffix = Path(original_name).suffix.lower() or ".docx"
@@ -59,7 +78,6 @@ class DocumentStore:
             raise ValueError("Only .docx uploads are supported in this release")
 
         document_id = f"doc_{uuid.uuid4().hex[:12]}"
-        # Keep original basename for downloads; folder is still unique
         safe_base = re.sub(r"[^\w.\- ]+", "_", Path(original_name).name).strip() or f"{document_id}.docx"
         if not safe_base.lower().endswith(".docx"):
             safe_base = f"{safe_base}.docx"
@@ -68,22 +86,27 @@ class DocumentStore:
         content = await upload.read()
         dest.write_bytes(content)
 
-        # Ensure EigenPal can open minimal packages without rewriting body text
-        try:
-            enrich_docx_for_editor(dest)
-        except Exception:  # noqa: BLE001
-            pass
+        assess_only = mode in {"assess", "extract"}
+        discovery = None
+        if not assess_only:
+            try:
+                discovery = await prepare_template_fields(dest, use_ai=True)
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            try:
+                enrich_docx_for_editor(dest)
+            except Exception:  # noqa: BLE001
+                pass
 
         editor = docx_to_blocks(dest)
         title = _display_title(original_name, document_id)
-        # Prefer first heading from document if filename is generic
         if title.lower() in {"document", "upload", "file", "untitled"}:
             first_line = (editor.get("plain_text") or "").strip().splitlines()[:1]
             if first_line and len(first_line[0].strip()) > 3:
                 title = first_line[0].strip()[:120]
 
         now = datetime.now(timezone.utc).isoformat()
-        assess_like = mode in {"assess", "review", "extract"}
         row = {
             "id": document_id,
             "filename": original_name,
@@ -92,13 +115,13 @@ class DocumentStore:
             "path": str(dest.resolve()),
             "created_at": now,
             "updated_at": now,
-            # Do not invent yellow Variables on assessment uploads
-            "field_count": 0 if assess_like else len(editor.get("fields") or []),
+            "field_count": 0 if assess_only else len(editor.get("fields") or []),
             "plain_text": editor.get("plain_text") or "",
             "blocks": editor.get("blocks") or [],
-            "fields": [] if assess_like else (editor.get("fields") or []),
-            "status": "uploaded_for_assessment" if mode == "assess" else "uploaded_for_review",
-            "preserve_original": True,
+            "fields": [] if assess_only else (editor.get("fields") or []),
+            "discovery": discovery,
+            "status": "uploaded_for_assessment" if assess_only else "uploaded_for_completion",
+            "preserve_original": assess_only,
         }
         self._items[document_id] = row
         self._save()

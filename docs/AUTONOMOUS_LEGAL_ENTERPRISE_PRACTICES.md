@@ -4,7 +4,8 @@ Reference article: [Architecting the Autonomous Legal Enterprise: From Machine L
 
 Related themes from the same author’s enterprise AI writing: context engineering over brittle prompts, agent permissions / human gates, evaluation & observability, auditability in regulated settings ([License to Act](https://medium.com/@adnanmasood/license-to-act-ai-agents-in-regulated-industries-3dbb1966530b), CoE / LLMOps guidance).
 
-> This note captures practices we should build toward. Some are already scaffolded in schema/UI; others are backlog.
+> **Status:** target architecture / backlog. The running app is filesystem-only (FastAPI + Next.js).
+> Treat schema / agent-permission / gate rows below as design intent, not live product behavior.
 
 ---
 
@@ -28,7 +29,7 @@ Architecture pillars called out for legal AI: **agentic workflows**, **RAG**, an
 | Assistive first, autonomy later | Most production legal AI is assistive; full autonomy is rare in regulated work | Capco Wayne drafts / reviews; no auto-send | Keep `agent_permission.external_send = false` |
 | Human gates for consequential acts | Nominal approval without evidence is not real oversight | `app.human_gate`, `issue_green` gated in seed | UI: approve GREEN / accept redline before export |
 | Explicit agent authority | Agents need a license-to-act matrix | `app.agent_permission` seeded for `capco_wayne` | Enforce in API before side effects |
-| Playbook + RAG context pipelines | Context engineering > one-off prompts | Skills + `skills/playbooks/*.md`; Qdrant in compose | Persist embeddings in `embedding_projection`; retrieve before review |
+| Playbook + RAG context pipelines | Context engineering > one-off prompts | Skills + `skills/playbooks/*.md` | Persist embeddings; retrieve before review |
 | Multi-agent / skill routing | Specialist skills beat one mega-prompt | commercial/employment skill pack + router | Add orchestrator agent that only routes + logs |
 | Evidence before assertion | Citations required for material findings | Design + review memo citations | Store `ai_citation` rows from every AI run |
 | Measure the system | Ops owns measurement | Partial (AI run rows) | Dashboards: latency, offline rate, human override, GREEN rate |
@@ -62,7 +63,7 @@ Rules:
 
 ## 4. Data schema already created for this path
 
-Applied under Postgres schemas `app` and `audit` (see `docker/init/`):
+Applied under Postgres schemas `app` and `audit` (design target — not in this repo’s runtime):
 
 - Tenancy / identity: `tenant`, `organization`, `legal_entity`, `app_user`, `role`
 - CLM core: `matter`, `template`, `template_version`, `field_definition`, `contract`, `contract_version`, `field_value`, `field_value_revision`, `document_artifact`

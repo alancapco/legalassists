@@ -45,6 +45,12 @@ async def ai_status() -> dict:
     return copilot.status()
 
 
+@router.get("/runs")
+async def ai_runs(limit: int = 50) -> dict:
+    runs = copilot.list_runs(limit=limit)
+    return {"count": len(runs), "items": runs}
+
+
 @router.post("/web-search")
 async def ai_web_search(request: WebSearchRequest) -> dict:
     if not brave_search.configured:

@@ -330,7 +330,6 @@ class TemplateCatalog:
             )
             for item in scanned.fields.values()
         ]
-        fields.sort(key=lambda f: f.label.lower())
         mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
         return TemplateDetail(
             id=template_id,

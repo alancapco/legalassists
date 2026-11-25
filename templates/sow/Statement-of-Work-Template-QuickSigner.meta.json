@@ -1,0 +1,13 @@
+{
+  "id": "statement-of-work-template-quicksigner",
+  "name": "SOW Template",
+  "category": "SOW",
+  "agreement_type": "SOW",
+  "description": "SOW template (48 yellow fields).",
+  "discovery": {
+    "bracket_highlights": 15,
+    "underscore_highlights": 9,
+    "ai_highlights": 38,
+    "field_count": 48
+  }
+}

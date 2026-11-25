@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     def catalog_cache_path(self) -> Path:
         return self.data_dir / "template_catalog.json"
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def ai_runs_log_path(self) -> Path:
+        return self.data_dir / "ai_runs.jsonl"
+
     @property
     def ai_configured(self) -> bool:
         return bool(self.api_key and self.api_key.strip())

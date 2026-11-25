@@ -12,15 +12,13 @@ Visual language follows [Capco Wealth & Asset Management](https://www.capco.com/
 
 - [Features](#features)
 - [Architecture](#architecture)
-- [Component map](#component-map)
+- [Components](#components)
 - [Data flow](#data-flow)
-- [Process flows](#process-flows)
-- [Install](#install)
+- [Installation](#installation)
 - [Configure](#configure)
 - [Run](#run)
 - [Templates & skills](#templates--skills)
 - [API surface](#api-surface)
-- [Docker](#docker)
 - [Security notes](#security-notes)
 
 ---
@@ -32,7 +30,7 @@ Visual language follows [Capco Wealth & Asset Management](https://www.capco.com/
 | **Create** | Blank Word workspace; Capco Wayne offers Templates / Upload / AI draft |
 | **Complete fields** | Streaming chat assigns yellow Variables into the live `.docx` |
 | **Assessment** | Skills playbook + optional Brave web research; document stays unchanged |
-| **Upload & Extract** | Single-file upload → original document preserved → auto skills assessment |
+| **Upload & Extract** | Single-file upload → original preserved → auto skills assessment |
 | **Inbox** | Save & exit drafts; reopen from Inbox |
 | **Templates** | Browse / upload / manage `.docx` templates with AI blank discovery |
 | **Skills** | Enable Capco commercial & employment review skills from `claude-for-legal` |
@@ -41,7 +39,7 @@ Visual language follows [Capco Wealth & Asset Management](https://www.capco.com/
 
 ## Architecture
 
-High-level runtime (local default):
+Local stack: **Next.js frontend + FastAPI backend + filesystem** (`templates/`, `data/`). No container runtime required.
 
 ```mermaid
 flowchart TB
@@ -59,32 +57,28 @@ flowchart TB
     Routers --> Services
   end
 
-  subgraph Data["Local data + optional infra"]
-    FS["templates/ · data/<br/>uploads · contracts · skills state"]
-    PG[("Postgres<br/>optional")]
-    Qdrant[("Qdrant<br/>optional")]
-    Minio[("MinIO<br/>optional")]
+  subgraph Local["Local filesystem"]
+    FS["templates/ · data/<br/>uploads · contracts · skills state · ai_runs.jsonl"]
   end
 
   subgraph External
     LLM["LLM API<br/>API_KEY + BASE_URL + MODEL"]
-    Brave["Brave Search API<br/>BRAVE_API_KEY"]
+    Brave["Brave Search API<br/>BRAVE_API_KEY optional"]
   end
 
-  Wayne -->|SSE chat /stream| Routers
+  Wayne -->|SSE /ai/chat/stream| Routers
   Editor -->|load / save .docx bytes| Routers
   Web -->|REST| Routers
   Services --> FS
-  Services -.-> PG
-  Services -.-> Qdrant
-  Services -.-> Minio
   Services -->|completions| LLM
   Services -->|assessment research| Brave
 ```
 
+Future-oriented product notes (not wired into this runtime): [`docs/LEGAL_CONTRACT_COMPLIANCE_DESIGN.md`](docs/LEGAL_CONTRACT_COMPLIANCE_DESIGN.md), [`docs/AUTONOMOUS_LEGAL_ENTERPRISE_PRACTICES.md`](docs/AUTONOMOUS_LEGAL_ENTERPRISE_PRACTICES.md).
+
 ---
 
-## Component map
+## Components
 
 ```mermaid
 flowchart LR
@@ -99,7 +93,9 @@ flowchart LR
     Main["main.py"]
     R["routers/"]
     S["services/"]
+    Assets["assets/docx_seed.docx"]
     Main --> R --> S
+    S --> Assets
   end
 
   subgraph Skills["skills/"]
@@ -114,19 +110,19 @@ flowchart LR
 
 | Layer | Key pieces |
 | --- | --- |
-| **UI** | `WorkspaceApp` (scrollable editor + resizable Wayne shell), `DocxCanvas`, `CapcoWaynePanel` |
+| **UI** | `WorkspaceApp`, `DocxCanvas`, `CapcoWaynePanel`, `InboxApp` |
 | **API** | FastAPI under `/api/v1` |
-| **AI** | `services/ai.py` — mode-aware prompts (`complete` vs `assess`), skill routing, streaming |
+| **AI** | `services/ai.py` — `complete` vs `assess`, skill routing, SSE |
 | **Search** | `services/web_search.py` — Brave Web Search for Assessment |
-| **Docs** | `documents.py` (preserve original uploads), `yellow_fields.py`, `field_discovery.py`, `docx_package.py` |
-| **Catalog** | Template index + upload with AI blank highlighting |
-| **Contracts** | Inbox drafts via `contracts/from-workspace` |
+| **Docs** | `documents.py`, `yellow_fields.py`, `field_discovery.py`, `docx_package.py` |
+| **Catalog** | Template index on disk + upload with AI blank highlighting |
+| **Contracts** | Inbox drafts via `POST /contracts/from-workspace` |
 
 ---
 
 ## Data flow
 
-### Complete yellow fields (live Word sync)
+### Complete yellow fields
 
 ```mermaid
 sequenceDiagram
@@ -139,7 +135,7 @@ sequenceDiagram
   U->>W: Facts (parties, dates, …)
   W->>API: SSE chat (mode=complete)
   API->>LLM: System + fields + document text
-  LLM-->>API: Tokens + ```fields``` block
+  LLM-->>API: Tokens + fields block
   API-->>W: Stream deltas
   W->>W: parseAssignedValues
   W->>Doc: onApplyFields(values)
@@ -148,7 +144,7 @@ sequenceDiagram
   Doc->>Doc: Remount editor with bytes
 ```
 
-### Assessment (skills + optional Brave; document unchanged)
+### Assessment (document unchanged)
 
 ```mermaid
 sequenceDiagram
@@ -161,7 +157,7 @@ sequenceDiagram
 
   U->>W: Upload & Extract / Assessment
   W->>API: SSE chat (mode=assess)
-  API->>Skills: route_review_skill(type, title, text)
+  API->>Skills: route_review_skill
   API->>Brave: research_for_assessment (if configured)
   Skills-->>API: Playbook body
   Brave-->>API: Snippets + URLs
@@ -170,58 +166,42 @@ sequenceDiagram
   API-->>W: Stream (no field writes)
 ```
 
----
-
-## Process flows
-
-### Core workflows (home)
-
-```mermaid
-flowchart TD
-  Home[My Work home]
-  Home --> Sign[Upload and Sign]
-  Home --> Create[Create and AI Review]
-  Home --> Extract[Upload and Extract]
-
-  Sign -->|upload .docx| WS1[Workspace mode=review]
-  Create -->|/create redirect| Blank[Blank workspace mode=create]
-  Blank --> T[Templates]
-  Blank --> Up[Upload]
-  Blank --> AI[Draft with AI]
-  Extract -->|upload preserve original| Assess[Workspace mode=assess + autostart]
-  Assess --> SkillsReview[Skills risk assessment]
-```
-
-### Save & Inbox
+### Persistence
 
 ```mermaid
 flowchart LR
-  WS[Workspace] -->|Back| Modal{Leave?}
-  Modal -->|Cancel| WS
-  Modal -->|Discard| Inbox[Inbox]
-  Modal -->|Save and exit| API[POST /contracts/from-workspace]
-  API --> Inbox
-  Inbox -->|Open| WS2[Workspace?contract=id]
+  Upload[Upload .docx] --> Uploads["data/uploads/"]
+  Save[Save & exit] --> Contracts["data/contracts/ + contracts_index.json"]
+  Templates[templates/**/*.docx] --> Catalog["data/template_catalog.json"]
+  Skills[skills/vendor + playbooks] --> State["data/skills_state.json"]
+  Wayne[AI runs] --> Log["data/ai_runs.jsonl"]
 ```
 
 ---
 
-## Install
+## Installation
 
 ### Prerequisites
 
-- **Python 3.11+** (backend venv)
-- **Node.js 20+** / npm (frontend)
-- Optional: **Docker** for Postgres / Qdrant / Neo4j / RabbitMQ / MinIO
+- **Python 3.11+**
+- **Node.js 20+** (22 OK) and npm
 
-### Clone
+### 1. Clone
 
 ```bash
 git clone https://github.com/alanyoungcy/legalassits.git
 cd legalassits
 ```
 
-### Backend
+### 2. Environment
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` — set at least `API_KEY` (and optionally `BRAVE_API_KEY`). **Never commit `.env`.**
+
+### 3. Backend
 
 ```bash
 cd backend
@@ -230,7 +210,7 @@ python3.11 -m venv .venv
 cd ..
 ```
 
-### Frontend
+### 4. Frontend
 
 ```bash
 cd frontend
@@ -238,41 +218,33 @@ npm install
 cd ..
 ```
 
-### Environment
+### 5. Start
 
 ```bash
-cp .env.example .env
+./scripts/dev.sh start
 ```
 
-Edit `.env` — **never commit this file**. Required for Capco Wayne:
-
-| Variable | Purpose |
+| Service | URL |
 | --- | --- |
-| `API_KEY` | LLM provider API key |
-| `BASE_URL` | OpenAI-compatible base URL |
-| `MODEL` | Model id |
-| `COPILOT_NAME` | Display name (quote if it contains spaces), e.g. `"Capco Wayne"` |
-| `BRAVE_API_KEY` | Optional; Assessment web research |
-| `NEXT_PUBLIC_API_BASE_URL` | Frontend → API, default `http://localhost:8000` |
+| App | http://localhost:3000 |
+| API health | http://localhost:8000/healthz |
+| OpenAPI | http://localhost:8000/docs |
+
+Stop: `./scripts/dev.sh stop` · Status: `./scripts/dev.sh status`
 
 ---
 
 ## Configure
 
-Minimal `.env` shape (values left empty on purpose):
-
-```bash
-COPILOT_NAME="Capco Wayne"
-API_KEY=
-BASE_URL=https://api.openai.com/v1
-MODEL=gpt-4o-mini
-BRAVE_API_KEY=
-BRAVE_SEARCH_ENABLED=true
-NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
-NEXT_PUBLIC_COPILOT_NAME="Capco Wayne"
-```
-
-See [`.env.example`](.env.example) for Docker infra defaults.
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `API_KEY` | Yes (for Wayne) | LLM provider API key |
+| `BASE_URL` | No | OpenAI-compatible base URL |
+| `MODEL` | No | Model id (default `gpt-4o-mini`) |
+| `COPILOT_NAME` | No | Display name, e.g. `"Capco Wayne"` |
+| `BRAVE_API_KEY` | No | Assessment web research |
+| `NEXT_PUBLIC_API_BASE_URL` | No | Frontend → API (`http://localhost:8000`) |
+| `CORS_ORIGINS` | No | Allowed browser origins |
 
 ---
 
@@ -281,17 +253,10 @@ See [`.env.example`](.env.example) for Docker infra defaults.
 ### Recommended: `dev.sh`
 
 ```bash
-./scripts/dev.sh start      # API :8000 + web :3000
+./scripts/dev.sh start
 ./scripts/dev.sh status
 ./scripts/dev.sh stop
 ./scripts/dev.sh restart
-```
-
-Optional infra only:
-
-```bash
-./scripts/dev.sh start infra
-./scripts/dev.sh stop infra
 ```
 
 ### Manual
@@ -305,15 +270,6 @@ cd backend
 cd frontend
 npm run dev -- --port 3000
 ```
-
-### URLs
-
-| Service | URL |
-| --- | --- |
-| App | http://localhost:3000 |
-| API health | http://localhost:8000/healthz |
-| OpenAPI | http://localhost:8000/docs |
-| Logs | `.run/logs/` (when using `dev.sh`) |
 
 ---
 
@@ -331,8 +287,6 @@ Drop `.docx` files under `templates/` (folders allowed). Yellow-highlighted text
 
 Optional sidecar: `my-template.meta.json` next to the `.docx`.
 
-Upload via **Templates** UI also runs AI blank discovery; packages are enriched so EigenPal can open python-docx outputs.
-
 Reindex:
 
 ```bash
@@ -346,7 +300,7 @@ Vendored from [anthropics/claude-for-legal](https://github.com/anthropics/claude
 - `skills/vendor/commercial-legal` — NDA / MSA / SaaS / vendor review
 - `skills/vendor/employment-legal` — hiring, termination, classification, …
 
-Manage enablement at `/skills`. Capco stubs: `skills/playbooks/`. Assessment mode auto-routes an enabled review skill from agreement type / title / text.
+Manage enablement at `/skills`. Capco stubs: `skills/playbooks/`.
 
 ---
 
@@ -354,8 +308,8 @@ Manage enablement at `/skills`. Capco stubs: `skills/playbooks/`. Assessment mod
 
 | Prefix | Role |
 | --- | --- |
-| `/api/v1/ai` | Chat, SSE stream, status, Brave web-search |
-| `/api/v1/documents` | Upload (original preserved), fill-fields, workspace docx |
+| `/api/v1/ai` | SSE stream chat, status |
+| `/api/v1/documents` | Upload, fill-fields, workspace docx |
 | `/api/v1/templates` | Catalog, upload, CRUD |
 | `/api/v1/contracts` | Drafts / Inbox (`from-workspace`) |
 | `/api/v1/skills` | List / toggle / reindex |
@@ -363,27 +317,12 @@ Manage enablement at `/skills`. Capco stubs: `skills/playbooks/`. Assessment mod
 
 ---
 
-## Docker
-
-Uses images already on the machine (`pull_policy: never` in compose). Templates mount from `./templates`.
-
-```bash
-docker compose up -d                          # infra
-docker compose --profile app up -d --build    # api + worker + web
-```
-
-Postgres init scripts: `docker/init/` (`01_extensions`, `02_schema`, `03_seed`).
-
-Design / practices backlog: [`docs/LEGAL_CONTRACT_COMPLIANCE_DESIGN.md`](docs/LEGAL_CONTRACT_COMPLIANCE_DESIGN.md), [`docs/AUTONOMOUS_LEGAL_ENTERPRISE_PRACTICES.md`](docs/AUTONOMOUS_LEGAL_ENTERPRISE_PRACTICES.md).
-
----
-
 ## Security notes
 
-- **Do not commit** `.env`, API keys, Brave tokens, or real client documents under `data/uploads` / `data/contracts`.
-- `.gitignore` excludes `.env`, `.env.*` (keeps `.env.example`), uploads, contracts, and local indexes.
-- Rotate any key that was ever pasted into chat, tickets, or screenshots.
-- Assessment mode must not mutate the Word document; completion mode writes Variables only after structured ` ```fields` ` blocks.
+- **Do not commit** `.env`, API keys, Brave tokens, or client documents under `data/`.
+- `.gitignore` excludes `.env`, uploads, contracts, catalogs, and `data/ai_runs.jsonl`.
+- Rotate any key that was pasted into chat, tickets, or screenshots.
+- Assessment mode must not mutate the Word document; completion mode writes Variables only after structured `fields` blocks.
 
 ---
 

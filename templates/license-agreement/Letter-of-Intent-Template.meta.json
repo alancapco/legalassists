@@ -1,0 +1,13 @@
+{
+  "id": "letter-of-intent-template",
+  "name": "Letter of Intent Template",
+  "category": "License Agreement",
+  "agreement_type": "License Agreement",
+  "description": "Uploaded License Agreement template. 10 yellow fields detected (AI + blank analysis).",
+  "discovery": {
+    "bracket_highlights": 12,
+    "underscore_highlights": 0,
+    "ai_highlights": 0,
+    "field_count": 10
+  }
+}

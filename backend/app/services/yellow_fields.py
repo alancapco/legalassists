@@ -71,19 +71,32 @@ def _is_yellow_run(run) -> bool:
 
 
 def _iter_paragraphs(document: Document) -> Iterable[Paragraph]:
-    for paragraph in document.paragraphs:
-        yield paragraph
-    for table in document.tables:
-        yield from _iter_table_paragraphs(table)
+    """Yield paragraphs in true top-to-bottom XML document order (body + tables interleaved)."""
+
+    def _walk_container(parent_elm, parent_obj) -> Iterable[Paragraph]:
+        for child in parent_elm.iterchildren():
+            if child.tag == qn("w:p"):
+                yield Paragraph(child, parent_obj)
+            elif child.tag == qn("w:tbl"):
+                table = Table(child, parent_obj)
+                yield from _iter_table_paragraphs(table)
+
+    yield from _walk_container(document.element.body, document)
 
 
 def _iter_table_paragraphs(table: Table) -> Iterable[Paragraph]:
     for row in table.rows:
+        seen_tcs: set[int] = set()
         for cell in row.cells:
-            for paragraph in cell.paragraphs:
-                yield paragraph
-            for nested in cell.tables:
-                yield from _iter_table_paragraphs(nested)
+            tc_id = id(cell._tc)
+            if tc_id in seen_tcs:
+                continue
+            seen_tcs.add(tc_id)
+            for child in cell._tc.iterchildren():
+                if child.tag == qn("w:p"):
+                    yield Paragraph(child, cell)
+                elif child.tag == qn("w:tbl"):
+                    yield from _iter_table_paragraphs(Table(child, cell))
 
 
 @dataclass
@@ -117,6 +130,65 @@ PLACEHOLDER_FIND = re.compile(
     r"\{\{[^{}]+\}\}|\[\[[^\[\]]+\]\]|\[[^\[\]]{1,80}\]"
 )
 
+# Inline choice options / optional clause prefixes that use [brackets] in legal templates
+# but are NOT fillable field placeholders.
+_OPTION_BRACKET_WORDS = frozenset(
+    {
+        "advance",
+        "arrears",
+        "do",
+        "do not",
+        "binding",
+        "non-binding",
+        "week",
+        "month",
+        "year",
+        "an individual residing at",
+        "an individual with a mailing address at",
+        "as the milestone fees in section 3",
+        "x",
+    }
+)
+
+
+def is_valid_placeholder_token(token: str) -> bool:
+    """Return True if a matched [bracket] / {{mustache}} token is a genuine fillable placeholder."""
+    raw = (token or "").strip()
+    if not raw:
+        return False
+    if raw.startswith("{{") or raw.startswith("[["):
+        inner = raw[2:-2].strip()
+        return bool(inner) and not re.fullmatch(r"[_\s$]+", inner)
+    if raw.startswith("[") and raw.endswith("]"):
+        inner = raw[1:-1].strip()
+        if not inner:
+            return False
+        # Skip checkboxes [  ] or underscore-only tokens [__], [$___]
+        if re.fullmatch(r"[_\s$]+", inner):
+            return False
+        # Skip optional clause brackets that contain underscore blanks, choice slashes, or full sentences
+        if "___" in inner or " / " in inner or ". " in inner:
+            return False
+        # Skip optional clause brackets starting with punctuation like [, except that...]
+        if inner[0] in ",;:.":
+            return False
+        lowered = " ".join(inner.lower().split())
+        if lowered in _OPTION_BRACKET_WORDS:
+            return False
+        if lowered.startswith(
+            (
+                "or until ",
+                "as follows:",
+                "approved in advance",
+                "total fees shall ",
+                "not to exceed ",
+                "the employer ",
+            )
+        ):
+            return False
+        return True
+    return False
+
 
 def ensure_placeholder_highlights(path: Path) -> int:
     """Yellow-highlight [bracket] / {{mustache}} placeholders so they become fillable fields.
@@ -129,7 +201,11 @@ def ensure_placeholder_highlights(path: Path) -> int:
 
     for paragraph in _iter_paragraphs(document):
         text = paragraph.text or ""
-        matches = list(PLACEHOLDER_FIND.finditer(text))
+        matches = [
+            m
+            for m in PLACEHOLDER_FIND.finditer(text)
+            if is_valid_placeholder_token(m.group(0))
+        ]
         if not matches:
             continue
         # Skip rebuild when every match is already covered by yellow runs
@@ -179,6 +255,7 @@ def scan_docx(path: Path) -> ScannedTemplate:
     document = Document(str(path))
     result = ScannedTemplate(checksum=file_checksum(path))
     preview_parts: list[str] = []
+    prev_non_empty: str = ""
 
     for p_index, paragraph in enumerate(_iter_paragraphs(document)):
         text = paragraph.text.strip()
@@ -200,6 +277,12 @@ def scan_docx(path: Path) -> ScannedTemplate:
             if not placeholder.strip():
                 continue
             key, label = derive_field_key(placeholder)
+            # If the paragraph only contains the placeholder itself (e.g. a table value cell
+            # or a standalone blank line), include the preceding label/prompt paragraph for context.
+            if prev_non_empty and (text == placeholder.strip() or len(text) <= len(placeholder.strip()) + 12):
+                ctx_str = f"{prev_non_empty} → {text}"[:240]
+            else:
+                ctx_str = text[:240]
             occurrence = FieldOccurrence(
                 key=key,
                 label=label,
@@ -207,7 +290,7 @@ def scan_docx(path: Path) -> ScannedTemplate:
                 paragraph_index=p_index,
                 run_start=start,
                 run_end=i,
-                context=text[:240],
+                context=ctx_str,
             )
             result.occurrences.append(occurrence)
             bucket = result.fields.setdefault(
@@ -219,12 +302,15 @@ def scan_docx(path: Path) -> ScannedTemplate:
                     "occurrence_count": 0,
                     "required": True,
                     "field_type": "short_text",
-                    "sample_context": text[:240] or None,
+                    "sample_context": ctx_str or None,
                 },
             )
             bucket["occurrence_count"] += 1
 
-    result.preview_text = "\n\n".join(preview_parts[:40])
+        if text:
+            prev_non_empty = text
+
+    result.preview_text = "\n\n".join(preview_parts[:60])
     return result
 
 

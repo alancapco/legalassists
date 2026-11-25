@@ -3,7 +3,7 @@
   "name": "Master Service Agreement",
   "category": "MSA",
   "agreement_type": "MSA",
-  "description": "Uploaded MSA template. 11 yellow fields detected (AI + blank analysis).",
+  "description": "MSA template (11 yellow fields).",
   "discovery": {
     "bracket_highlights": 13,
     "underscore_highlights": 0,

@@ -55,14 +55,14 @@ export function HomeChat({ templates }: { templates: TemplateSummary[] }) {
 
   async function onUpload(
     file: File,
-    options?: { mode?: "assess" | "review"; autostart?: boolean },
+    options?: { mode?: "assess" | "review" | "complete"; autostart?: boolean },
   ) {
     setBusy(true);
     setError(null);
     try {
       const body = new FormData();
       body.append("file", file);
-      const uploadMode = options?.mode || "review";
+      const uploadMode = options?.mode || "complete";
       const response = await fetch(
         `${getApiBase()}/api/v1/documents/upload?mode=${encodeURIComponent(uploadMode)}`,
         { method: "POST", body },
@@ -161,7 +161,7 @@ export function HomeChat({ templates }: { templates: TemplateSummary[] }) {
             if (uploadIntentRef.current === "assess") {
               void onUpload(file, { mode: "assess", autostart: true });
             } else {
-              void onUpload(file, { mode: "review" });
+              void onUpload(file, { mode: "complete" });
             }
           }}
         />

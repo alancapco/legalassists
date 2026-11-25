@@ -126,6 +126,7 @@ export async function fillDocumentFields(body: {
   values: Record<string, string>;
   template_id?: string;
   document_id?: string;
+  docx_base64?: string;
   clear_highlight?: boolean;
 }) {
   const response = await fetch(`${API_BASE}/api/v1/documents/fill-fields`, {
@@ -137,6 +138,47 @@ export async function fillDocumentFields(body: {
     throw new Error(await response.text());
   }
   return new Uint8Array(await response.arrayBuffer());
+}
+
+export type DiscoverFieldsResponse = {
+  field_count: number;
+  fields: Array<{
+    key: string;
+    label: string;
+    placeholder: string;
+    value?: string;
+    sample_context?: string | null;
+  }>;
+  plain_text: string;
+  blocks: Array<Record<string, unknown>>;
+  discovery: Record<string, unknown>;
+  docx_base64: string;
+};
+
+export function discoverDocumentFields(body: {
+  template_id?: string;
+  document_id?: string;
+  docx_base64?: string;
+  use_ai?: boolean;
+}) {
+  return request<DiscoverFieldsResponse>("/api/v1/documents/discover-fields", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function saveTemplateFromWorkspace(body: {
+  name: string;
+  category: string;
+  docx_base64?: string;
+  template_id?: string;
+  document_id?: string;
+  use_ai?: boolean;
+}) {
+  return request<TemplateDetail>("/api/v1/templates/from-workspace", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }
 
 export async function uploadTemplate(
@@ -163,20 +205,6 @@ export function listContracts() {
 
 export function getContract(id: string) {
   return request<ContractDetail>(`/api/v1/contracts/${id}`);
-}
-
-export function createContract(body: {
-  template_id: string;
-  title: string;
-  field_values: Record<string, string>;
-  legal_entity?: string;
-  governing_law?: string;
-  counterparty?: string;
-}) {
-  return request<ContractDetail>("/api/v1/contracts", {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
 }
 
 export function saveWorkspaceContract(body: {
@@ -207,7 +235,16 @@ function bytesToBase64(bytes: Uint8Array) {
   return btoa(binary);
 }
 
-export { bytesToBase64 };
+function base64ToBytes(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+export { bytesToBase64, base64ToBytes };
 
 export type SkillPlugin = {
   id: string;
@@ -272,13 +309,6 @@ export function listSkills(params?: {
   return request<SkillSummary[]>(`/api/v1/skills${suffix}`);
 }
 
-export function getSkill(id: string, includeBody = false) {
-  const query = includeBody ? "?include_body=true" : "";
-  return request<SkillSummary & { body?: string }>(
-    `/api/v1/skills/${id}${query}`,
-  );
-}
-
 export function updateSkill(
   id: string,
   body: { enabled?: boolean; favorite?: boolean; notes?: string },
@@ -313,10 +343,6 @@ export function createReview(body: {
   });
 }
 
-export function getReview(id: string) {
-  return request<ReviewSummary>(`/api/v1/reviews/${id}`);
-}
-
 export function aiStatus() {
   return request<{
     copilot_name: string;
@@ -324,27 +350,6 @@ export function aiStatus() {
     model: string;
     configured: boolean;
   }>("/api/v1/ai/status");
-}
-
-export function aiChat(body: {
-  messages: Array<{ role: string; content: string }>;
-  mode?: string;
-  document_title?: string;
-  document_text?: string;
-  fields?: Array<Record<string, string>>;
-  skill_id?: string;
-}) {
-  return request<{
-    role: string;
-    content: string;
-    provider: string;
-    model?: string | null;
-    copilot_name: string;
-    offline?: boolean;
-  }>("/api/v1/ai/chat", {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
 }
 
 export type AiChatBody = {

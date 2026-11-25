@@ -1,0 +1,13 @@
+{
+  "id": "vendor-agreement-template",
+  "name": "Vendor Agreement",
+  "category": "Vendor Agreement",
+  "agreement_type": "Vendor Agreement",
+  "description": "Vendor Agreement template (9 yellow fields).",
+  "discovery": {
+    "bracket_highlights": 11,
+    "underscore_highlights": 0,
+    "ai_highlights": 0,
+    "field_count": 9
+  }
+}

@@ -259,6 +259,15 @@ class SkillRegistry:
         rows.sort(key=lambda r: (r["plugin"], r["name"]))
         return rows[:limit]
 
+    def load_playbook(self, plugin: str | None) -> str:
+        """Load the Capco practice profile / playbook markdown for a plugin."""
+        if not plugin:
+            return ""
+        path = self.settings.skills_playbooks_dir / f"{plugin}.CLAUDE.md"
+        if path.exists():
+            return path.read_text(encoding="utf-8").strip()
+        return ""
+
     def _load_state(self) -> None:
         if not self.state_path.exists():
             self._state = {"skills": {}, "updated_at": None}

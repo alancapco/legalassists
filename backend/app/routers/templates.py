@@ -1,10 +1,14 @@
 """Template catalog API."""
 
+import base64
+from pathlib import Path
+
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from app.models.schemas import TemplateDetail, TemplateSummary
 from app.services.catalog import STANDARD_CATEGORIES, catalog
+from app.services.documents import document_store
 
 router = APIRouter(prefix="/templates", tags=["templates"])
 
@@ -16,6 +20,15 @@ class TemplateUpdateRequest(BaseModel):
     jurisdiction: str | None = None
     entity_scope: str | None = None
     description: str | None = None
+
+
+class SaveFromWorkspaceRequest(BaseModel):
+    name: str
+    category: str = "Other"
+    docx_base64: str | None = None
+    template_id: str | None = None
+    document_id: str | None = None
+    use_ai: bool = True
 
 
 @router.get("", response_model=list[TemplateSummary])
@@ -62,6 +75,40 @@ async def upload_template(
             category=category,
             name=name,
             use_ai=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/from-workspace", response_model=TemplateDetail)
+async def save_template_from_workspace(body: SaveFromWorkspaceRequest) -> TemplateDetail:
+    """Save the current workspace .docx as a reusable template with AI field discovery."""
+    content: bytes | None = None
+    if body.docx_base64:
+        try:
+            content = base64.b64decode(body.docx_base64)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail="Invalid docx_base64") from exc
+    elif body.document_id:
+        doc = document_store.get(body.document_id)
+        if doc and Path(doc["path"]).exists():
+            content = Path(doc["path"]).read_bytes()
+    elif body.template_id:
+        path = catalog.resolve_path(body.template_id)
+        if path and path.exists():
+            content = path.read_bytes()
+
+    if not content:
+        raise HTTPException(status_code=400, detail="No document content available to save as template")
+
+    safe_filename = f"{body.name.strip() or 'template'}.docx"
+    try:
+        return await catalog.save_upload(
+            filename=safe_filename,
+            content=content,
+            category=body.category,
+            name=body.name.strip() or None,
+            use_ai=body.use_ai,
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc

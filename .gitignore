@@ -13,6 +13,7 @@ node_modules/
 *.key
 credentials*.json
 secrets/
+# Runtime / local data — never commit client docs or AI telemetry
 data/uploads/
 data/uploads_index.json
 data/contracts/
@@ -21,8 +22,11 @@ data/filled/
 data/template_catalog.json
 data/skills_state.json
 data/reviews_index.json
+data/ai_runs.jsonl
+data/*.jsonl
 .DS_Store
 *.log
 frontend/tsconfig.tsbuildinfo
+template_raw/
 
 .run/

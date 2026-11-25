@@ -8,13 +8,16 @@ import { CapcoWaynePanel } from "@/components/CapcoWaynePanel";
 import type { DocxCanvasHandle } from "@/components/DocxCanvas";
 import {
   aiStatus,
+  base64ToBytes,
   bytesToBase64,
+  discoverDocumentFields,
   downloadContractUrl,
   fillDocumentFields,
   getApiBase,
   getContract,
   getDocument,
   getWorkspaceFromTemplate,
+  saveTemplateFromWorkspace,
   saveWorkspaceContract,
 } from "@/lib/api";
 
@@ -35,6 +38,7 @@ type EditorField = {
   label: string;
   placeholder: string;
   value?: string;
+  sample_context?: string | null;
 };
 
 type WorkspacePayload = {
@@ -228,22 +232,36 @@ export function WorkspaceApp({
       const canvas = (await waitForCanvas()) || docxHandleRef.current;
       dirtyRef.current = true;
 
-      if ((templateId || documentId) && canvas?.loadBytes) {
+      const activeTemplateId =
+        templateId ||
+        (payload?.template_id && !payload.template_id.startsWith("doc:") && payload.template_id !== "workspace"
+          ? payload.template_id
+          : undefined);
+
+      if (canvas?.loadBytes) {
         try {
           const mergedValues = { ...appliedRef.current };
           for (const [key, raw] of pending) mergedValues[key] = raw.trim();
-          const bytes = await fillDocumentFields({
-            values: mergedValues,
-            template_id: templateId,
-            document_id: documentId,
-            clear_highlight: false,
-          });
-          const live = (await waitForCanvas()) || canvas;
-          live.loadBytes(bytes);
-          for (const [key, raw] of Object.entries(mergedValues)) {
-            if (raw?.trim()) appliedRef.current[key] = raw.trim();
+          let docxBase64: string | undefined;
+          if (!activeTemplateId && !documentId && canvas?.saveBytes) {
+            const cur = await canvas.saveBytes();
+            if (cur?.length) docxBase64 = bytesToBase64(cur);
           }
-          return pending.length;
+          if (activeTemplateId || documentId || docxBase64) {
+            const bytes = await fillDocumentFields({
+              values: mergedValues,
+              template_id: activeTemplateId,
+              document_id: documentId,
+              docx_base64: docxBase64,
+              clear_highlight: false,
+            });
+            const live = (await waitForCanvas()) || canvas;
+            live.loadBytes(bytes);
+            for (const [key, raw] of Object.entries(mergedValues)) {
+              if (raw?.trim()) appliedRef.current[key] = raw.trim();
+            }
+            return pending.length;
+          }
         } catch (err) {
           console.warn("[Capco Wayne] server fill failed, trying in-editor replace", err);
         }
@@ -364,19 +382,89 @@ export function WorkspaceApp({
     setExitOpen(true);
   }
 
+  const handleDiscoverFields = useCallback(async () => {
+    const canvas = (await waitForCanvas()) || docxHandleRef.current;
+    let docxBase64: string | undefined;
+    try {
+      const bytes = await canvas?.saveBytes?.();
+      if (bytes?.length) docxBase64 = bytesToBase64(bytes);
+    } catch (err) {
+      console.warn("[workspace] editor saveBytes failed before discover-fields", err);
+    }
+    const activeTemplateId =
+      templateId ||
+      (payload?.template_id && !payload.template_id.startsWith("doc:") && payload.template_id !== "workspace"
+        ? payload.template_id
+        : undefined);
+
+    const res = await discoverDocumentFields({
+      template_id: activeTemplateId,
+      document_id: documentId,
+      docx_base64: docxBase64,
+      use_ai: true,
+    });
+    if (res.docx_base64 && canvas?.loadBytes) {
+      canvas.loadBytes(base64ToBytes(res.docx_base64));
+    }
+    setPayload((prev) => ({
+      ...(prev || { title }),
+      fields: res.fields,
+      plain_text: res.plain_text,
+    }));
+    setValues((prev) => {
+      const next: Record<string, string> = {};
+      for (const f of res.fields) {
+        next[f.key] = prev[f.key] || f.value || "";
+      }
+      return next;
+    });
+    dirtyRef.current = true;
+    return res.field_count;
+  }, [waitForCanvas, templateId, payload?.template_id, documentId, title]);
+
+  const handleSaveAsTemplate = useCallback(
+    async (templateName: string, category: string) => {
+      const canvas = (await waitForCanvas()) || docxHandleRef.current;
+      let docxBase64: string | undefined;
+      try {
+        const bytes = await canvas?.saveBytes?.();
+        if (bytes?.length) docxBase64 = bytesToBase64(bytes);
+      } catch (err) {
+        console.warn("[workspace] editor saveBytes failed before saveTemplateFromWorkspace", err);
+      }
+      const activeTemplateId =
+        templateId ||
+        (payload?.template_id && !payload.template_id.startsWith("doc:") && payload.template_id !== "workspace"
+          ? payload.template_id
+          : undefined);
+      const detail = await saveTemplateFromWorkspace({
+        name: templateName.trim() || title.trim() || "New Template",
+        category: category.trim() || "Other",
+        docx_base64: docxBase64,
+        template_id: activeTemplateId,
+        document_id: documentId,
+        use_ai: true,
+      });
+      dirtyRef.current = false;
+      router.push(`/workspace?template=${encodeURIComponent(detail.id)}&mode=draft`);
+      return detail.field_count;
+    },
+    [waitForCanvas, templateId, payload?.template_id, title, documentId, router],
+  );
+
   async function onUpload(file: File) {
     setBusy(true);
     setError(null);
     try {
       const body = new FormData();
       body.append("file", file);
-      const response = await fetch(`${getApiBase()}/api/v1/documents/upload?mode=review`, {
+      const response = await fetch(`${getApiBase()}/api/v1/documents/upload?mode=complete`, {
         method: "POST",
         body,
       });
       if (!response.ok) throw new Error(await response.text());
       const doc = await response.json();
-      window.location.href = `/workspace?document=${encodeURIComponent(doc.id)}&mode=review`;
+      window.location.href = `/workspace?document=${encodeURIComponent(doc.id)}&mode=complete`;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Upload failed");
       setBusy(false);
@@ -506,6 +594,8 @@ export function WorkspaceApp({
           autoStartAssess={autoStartAssess && Boolean(documentId || initialContractId || templateId)}
           onBrowseTemplates={() => setTemplatesOpen(true)}
           onUploadDocument={() => fileRef.current?.click()}
+          onDiscoverFields={handleDiscoverFields}
+          onSaveAsTemplate={handleSaveAsTemplate}
         />
       </div>
 

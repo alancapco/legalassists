@@ -9,7 +9,7 @@ from docx import Document
 from docx.enum.text import WD_COLOR_INDEX
 from docx.oxml.ns import qn
 
-from app.services.yellow_fields import derive_field_key
+from app.services.yellow_fields import _iter_paragraphs, derive_field_key
 
 
 def _is_yellow_run(run) -> bool:
@@ -31,8 +31,9 @@ def docx_to_blocks(path: Path) -> dict[str, Any]:
     document = Document(str(path))
     blocks: list[dict[str, Any]] = []
     fields: dict[str, dict[str, Any]] = {}
+    prev_non_empty = ""
 
-    for p_index, paragraph in enumerate(document.paragraphs):
+    for p_index, paragraph in enumerate(_iter_paragraphs(document)):
         style_name = paragraph.style.name if paragraph.style else "Normal"
         level = 0
         if style_name.startswith("Heading"):
@@ -41,12 +42,12 @@ def docx_to_blocks(path: Path) -> dict[str, Any]:
             except ValueError:
                 level = 1
 
+        para_text = paragraph.text.strip()
         runs_out: list[dict[str, Any]] = []
         runs = paragraph.runs
         i = 0
         while i < len(runs):
             if _is_yellow_run(runs[i]):
-                start = i
                 chunks: list[str] = []
                 while i < len(runs) and _is_yellow_run(runs[i]):
                     chunks.append(runs[i].text or "")
@@ -55,6 +56,10 @@ def docx_to_blocks(path: Path) -> dict[str, Any]:
                 if not placeholder:
                     continue
                 key, label = derive_field_key(placeholder)
+                if prev_non_empty and (para_text == placeholder or len(para_text) <= len(placeholder) + 12):
+                    sample_context = f"{prev_non_empty} → {para_text}"[:240]
+                else:
+                    sample_context = para_text[:240]
                 fields.setdefault(
                     key,
                     {
@@ -62,6 +67,7 @@ def docx_to_blocks(path: Path) -> dict[str, Any]:
                         "label": label,
                         "placeholder": placeholder,
                         "value": "",
+                        "sample_context": sample_context or None,
                     },
                 )
                 runs_out.append(
@@ -87,7 +93,10 @@ def docx_to_blocks(path: Path) -> dict[str, Any]:
                 )
             i += 1
 
-        if not runs_out and not paragraph.text.strip():
+        if para_text:
+            prev_non_empty = para_text
+
+        if not runs_out and not para_text:
             blocks.append({"type": "spacer", "index": p_index})
             continue
 

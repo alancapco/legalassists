@@ -1,5 +1,8 @@
 # Capco AI Legal Contract Compliance Assistant
 
+> **Not current implementation.** This is the target / greenfield design (MinerU, Postgres SoR, Temporal, Qdrant, Neo4j, object storage, message bus).  
+> What ships today is the filesystem FastAPI + Next.js app described in the root `README.md` (no containers).
+
 ## 1. Purpose and design direction
 
 This document defines the product and technical design for a Capco contract lifecycle workspace. It is a greenfield design based on the supplied reference screens and product notes. The experience should feel like a focused legal operations workspace: a persistent left navigation, a calm document canvas, and an AI assistant that works beside the contract rather than taking the user away from it.
@@ -15,7 +18,7 @@ The initial operating context is Capco and Wipro work across Hong Kong and the U
 - Provide assisted redlining, comments, approvals, version history, and auditability.
 - Extract obligations, dates, renewal windows, and financial terms into a searchable repository.
 - Let legal and operations teams search across contracts using natural language and structured filters.
-- Run the complete application stack through Docker-based local and deployment environments.
+- Run the complete application stack through repeatable local and deployment environments.
 - Keep e-signature as a future connector with a stable handoff point, without making it part of the first release.
 
 ### Non-goals for the first release
@@ -398,9 +401,9 @@ flowchart LR
 
 PostgreSQL remains the transactional source of truth. Qdrant and Neo4j are projections: every vector or graph record includes the source tenant, contract/version ID, source revision, and index version so projections can be rebuilt from PostgreSQL and object storage.
 
-### Docker deployment baseline
+### Deployment baseline (future)
 
-Every service should run in a container, with a Docker Compose profile for local development and a production deployment path that preserves the same service boundaries. The baseline stack is:
+Target service boundaries for a later multi-service deployment (not present in the current filesystem app). The baseline stack is:
 
 | Service | Container responsibility | Persistent data |
 | --- | --- | --- |
@@ -414,7 +417,7 @@ Every service should run in a container, with a Docker Compose profile for local
 | `redis` | Optional short-lived cache, locks, and rate limits; not the source of durable jobs | Disposable development volume or named volume when required |
 | `minio` or S3 | Original files, MinerU result ZIPs, editor exports, and evidence packages | Named object-store volume in local development |
 
-The Compose file should define a private application network, health checks, explicit service dependencies, resource limits, named volumes, and environment-variable references rather than inline secrets. Use separate `dev`, `test`, and `prod-like` profiles. Production should move managed or clustered stateful services out of a single host when availability, backup, or residency requirements demand it, while keeping the same connection contracts.
+Orchestration (Compose, Kubernetes, or managed PaaS) should define a private application network, health checks, explicit service dependencies, resource limits, named volumes, and environment-variable references rather than inline secrets. Production should move managed or clustered stateful services out of a single host when availability, backup, or residency requirements demand it, while keeping the same connection contracts.
 
 Backups must cover PostgreSQL, Qdrant snapshots, Neo4j dumps, RabbitMQ definitions and durable queue configuration, and object storage versioning. Restore tests should rebuild Qdrant and Neo4j from PostgreSQL/object-store records and verify that tenant isolation and document citations still work.
 
@@ -505,7 +508,7 @@ Every user-visible job has a correlation ID and a support-safe error message. Lo
 - Tenant, identity, roles, entities, jurisdictions, audit events, object storage, and basic request records.
 - Design system shell, navigation, accessibility, and responsive behavior.
 - MinerU adapter spike with representative Capco documents and extraction quality baseline.
-- Docker Compose baseline with PostgreSQL, Qdrant, Neo4j, RabbitMQ, optional Redis, object storage, API, worker, and web services.
+- Deployable multi-service baseline with PostgreSQL, Qdrant, Neo4j, RabbitMQ, optional Redis, object storage, API, worker, and web services.
 - RabbitMQ long-running job flow with durable queues, outbox publishing, retries, dead-letter routing, idempotent workers, and visible job progress.
 - Live editor integration spike covering template load, field binding, autosave, comments, tracked changes, and export.
 
@@ -544,7 +547,7 @@ E-signature should attach to the existing `ApprovedForCirculation` state through
 - At least one approval workflow can be configured and completed without signature integration.
 - Confirmed obligations produce reminders and show their source clause.
 - Search respects tenant and matter permissions.
-- A fresh Docker Compose environment starts PostgreSQL, Qdrant, Neo4j, RabbitMQ, object storage, API, worker, and web services with health checks; Redis is optional for ephemeral caching and locks.
+- A fresh multi-service environment starts PostgreSQL, Qdrant, Neo4j, RabbitMQ, object storage, API, worker, and web services with health checks; Redis is optional for ephemeral caching and locks.
 - A long-running MinerU or AI job survives an API restart, can be retried after a worker failure, and appears as a recoverable status record in the UI.
 - Qdrant and Neo4j records can be rebuilt from the transactional and object-store data without losing tenant filters or citations.
 - A user can export a contract and its evidence package with an audit record.

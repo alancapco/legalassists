@@ -18,16 +18,15 @@ usage() {
 Usage: $(basename "$0") <command> [target]
 
 Commands:
-  start   [all|api|web|infra]   Start services (default: all)
-  stop    [all|api|web|infra]   Stop services (default: all)
-  restart [all|api|web|infra]   Restart services
-  status                        Show process / health status
+  start   [all|api|web]   Start services (default: all)
+  stop    [all|api|web]   Stop services (default: all)
+  restart [all|api|web]   Restart services
+  status                  Show process / health status
 
 Examples:
   ./scripts/dev.sh start
   ./scripts/dev.sh stop
   ./scripts/dev.sh start api
-  ./scripts/dev.sh start infra
 EOF
 }
 
@@ -119,11 +118,6 @@ start_web() {
   echo "Web ready → http://127.0.0.1:${WEB_PORT}"
 }
 
-start_infra() {
-  echo "Starting Docker infra (postgres, etc.)…"
-  (cd "$ROOT" && docker compose up -d)
-}
-
 stop_api() {
   echo "Stopping API…"
   if is_pid_running "$API_PID"; then
@@ -140,16 +134,10 @@ stop_web() {
     local pid
     pid="$(cat "$WEB_PID")"
     kill "$pid" 2>/dev/null || true
-    # Next often spawns children; clear the port too
   fi
   kill_port "$WEB_PORT"
   rm -f "$WEB_PID"
   echo "Web stopped"
-}
-
-stop_infra() {
-  echo "Stopping Docker infra…"
-  (cd "$ROOT" && docker compose down)
 }
 
 show_status() {
@@ -168,16 +156,6 @@ show_status() {
   else
     echo "Web  : stopped"
   fi
-
-  if command -v docker >/dev/null 2>&1; then
-    local ps
-    ps="$(cd "$ROOT" && docker compose ps --status running --format '{{.Name}}' 2>/dev/null | tr '\n' ' ' || true)"
-    if [[ -n "${ps// /}" ]]; then
-      echo "Infra: running  ${ps}"
-    else
-      echo "Infra: stopped (or docker unavailable)"
-    fi
-  fi
 }
 
 cmd="${1:-}"
@@ -189,7 +167,6 @@ case "$cmd" in
       all) start_api; start_web ;;
       api) start_api ;;
       web) start_web ;;
-      infra) start_infra ;;
       *) usage; exit 1 ;;
     esac
     ;;
@@ -198,7 +175,6 @@ case "$cmd" in
       all) stop_web; stop_api ;;
       api) stop_api ;;
       web) stop_web ;;
-      infra) stop_infra ;;
       *) usage; exit 1 ;;
     esac
     ;;
@@ -207,7 +183,6 @@ case "$cmd" in
       all) stop_web; stop_api; start_api; start_web ;;
       api) stop_api; start_api ;;
       web) stop_web; start_web ;;
-      infra) stop_infra; start_infra ;;
       *) usage; exit 1 ;;
     esac
     ;;

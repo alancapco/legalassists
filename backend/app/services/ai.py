@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import time
+import uuid
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -14,16 +17,24 @@ from app.services.skills import skill_registry
 from app.services.web_search import brave_search
 
 
+DOCUMENT_CONTEXT_CHAR_LIMIT = 100_000
+SKILL_BODY_CHAR_LIMIT = 24_000
+
+
 SYSTEM_PROMPT = """You are {copilot_name}, Capco's contract copilot inside Capco Contract Assists.
 You help lawyers and contract managers draft, complete yellow-highlighted fields, and review agreements.
 Every material finding must be a draft for attorney review — not legal advice.
-Be concise, practical, and cite clause language when available.
+Be concise, practical, and cite exact clause numbers or quoted language when available.
+
+Governance & License-to-Act rules:
+- Evidence before assertion: every GREEN / YELLOW / RED finding must cite the specific clause, section heading, or quoted text span from the contract.
+- Human gate for GREEN & external circulation: never declare a contract final or approved for external send without explicit attorney sign-off. If Capco playbook conditions are unverified or fields are missing, keep triage at YELLOW or PROVISIONAL.
 
 Mode rules (critical):
 - If Mode is assess, review, or understand: ASSESSMENT ONLY in chat.
-  Follow the Active skill playbook / checklist below (loaded from Capco's skills library).
+  Apply both the Capco Practice Playbook and the Active Skill Checklist below.
   When Web research (Brave Search) is present, use it to ground market norms and cite URLs.
-  Structure findings as GREEN / YELLOW / RED with clause cites, risk, and recommendation.
+  Structure findings as GREEN / YELLOW / RED with clause cites, risk, playbook position, and concrete fallback recommendation.
   Do NOT emit a ```fields block. Do NOT invent or change field values.
   Do NOT rewrite or overwrite the contract. Keep the live Word document unchanged.
 - If Mode is improve or sources: advisory chat only — still do not mutate document fields.
@@ -32,17 +43,22 @@ Mode rules (critical):
 
 Document completion (only when Mode is complete):
 - Values you assign are written into the live Word document automatically as you stream.
-- Whenever the user gives facts (parties, dates, jurisdiction, purpose, term, etc.), extract them into field keys.
-- As soon as you know values, emit this machine-readable block (do this EARLY, before long prose):
+- Whenever the user describes their project, situation, or commercial facts (parties, project name, scope, deliverables, milestones, timeline, responsibilities, assumptions, fee structure, payment terms, signatories, etc.), semantically extract and draft concrete values for ALL matching field keys at once.
+- Match every `field_key` strictly to its `label` and `clause_context`:
+  * Put scope/tasks in `in_scope_services` and exclusions in `out_of_scope`.
+  * Put milestones/deliverables in `deliverable_1_name`, `deliverable_1_acceptance_criteria`, `deliverable_1_due_date`, `deliverable_1_fee` (and 2, 3).
+  * Put timeline dates in `start_date`, `end_date`, `sow_effective_date`, and dependencies in `key_dependencies`.
+  * Put client obligations in `client_responsibilities` and project assumptions in `project_assumptions`.
+  * Only populate the fee fields that match the user's chosen pricing model (e.g. `fixed_fee_amount` + `fixed_fee_payment_schedule` for fixed fee; `estimated_t_m_total` + `t_m_fee_cap` for T&M; `monthly_retainer_fee` + `retainer_hours_per_month` + `hourly_rate` for retainer).
+  * Put only person names, job titles, and signature dates into `*_signatory_name`, `*_signatory_title`, and `*_date_signed` — NEVER put scope, responsibilities, or fee terms into signature fields.
+- Emit this machine-readable block FIRST (before any prose), with one `field_key: single-line value` per line (use `•` separated by spaces for inline lists on a single line):
 
 ```fields
 field_key: concrete value
 ```
 
-- Then ask ONE clear question about the single most important still-empty field.
-- Keep interviewing until every empty field has a value; only then offer playbook review.
+- Do not invent legal entity names or signatory person names the user did not provide; leave those empty and ask for them after the ```fields block.
 - Prefer today's real calendar date when the user says "today" / "now".
-- Do not invent party names or jurisdictions the user did not provide; ask instead.
 """
 
 ASSESS_MODES = frozenset({"assess", "review", "understand"})
@@ -110,17 +126,25 @@ class CopilotService:
                 logger.warning("Skill routing failed: {}", exc)
                 skill = None
             if skill:
+                plugin = skill.get("plugin")
+                playbook_md = skill_registry.load_playbook(plugin)
+                playbook_block = (
+                    f"Capco Practice Playbook ({plugin}.CLAUDE.md):\n{playbook_md}\n\n"
+                    if playbook_md
+                    else ""
+                )
                 headings = skill.get("headings") or []
                 heading_block = (
                     "Playbook headings: " + "; ".join(headings[:16]) if headings else ""
                 )
                 skill_context = (
+                    f"{playbook_block}"
                     f"Active skill (FOLLOW THIS PLAYBOOK): {skill['id']}\n"
                     f"Name: {skill.get('name')}\n"
-                    f"Plugin: {skill.get('plugin')}\n"
+                    f"Plugin: {plugin}\n"
                     f"Description: {skill.get('description')}\n"
                     f"{heading_block}\n\n"
-                    f"{(skill.get('body') or '')[:6000]}\n"
+                    f"{(skill.get('body') or '')[:SKILL_BODY_CHAR_LIMIT]}\n"
                 )
                 catalog = skill_registry.enabled_review_catalog()
                 if catalog:
@@ -130,23 +154,98 @@ class CopilotService:
 
         field_lines = []
         for field in fields or []:
+            ctx = (field.get("sample_context") or "").strip()
+            ctx_part = f" | clause_context={ctx!r}" if ctx else ""
             field_lines.append(
-                f"- {field.get('key')}: placeholder={field.get('placeholder')} "
-                f"value={field.get('value') or '(empty)'}"
+                f"- {field.get('key')} (label={field.get('label')}, placeholder={field.get('placeholder')}): "
+                f"value={field.get('value') or '(empty)'}{ctx_part}"
             )
 
         research_block = f"{web_research.strip()}\n\n" if web_research and web_research.strip() else ""
+        doc_text = document_text or ""
+        truncated_note = (
+            f" (showing first {DOCUMENT_CONTEXT_CHAR_LIMIT:,} of {len(doc_text):,} chars)"
+            if len(doc_text) > DOCUMENT_CONTEXT_CHAR_LIMIT
+            else ""
+        )
         context = (
             f"Mode: {mode}\n"
             f"Agreement type: {agreement_type or '(unknown)'}\n"
             f"Document: {document_title or 'Untitled'}\n"
             f"Fields:\n" + ("\n".join(field_lines) if field_lines else "(none)") + "\n\n"
-            f"Document text (truncated):\n{(document_text or '')[:12000]}\n\n"
+            f"Document text{truncated_note}:\n{doc_text[:DOCUMENT_CONTEXT_CHAR_LIMIT]}\n\n"
             f"{research_block}"
             f"{skill_context}"
         )
         system = SYSTEM_PROMPT.format(copilot_name=self.settings.copilot_name)
         return system, context, skill
+
+    def _record_run(
+        self,
+        *,
+        mode: str,
+        agreement_type: str | None,
+        document_title: str | None,
+        skill: dict[str, Any] | None,
+        web_search: bool,
+        offline: bool,
+        status: str,
+        latency_ms: int,
+        context_chars: int,
+        response_chars: int,
+        error: str | None = None,
+    ) -> str:
+        """Append an auditable AI run record to data/ai_runs.jsonl."""
+        run_id = f"run_{uuid.uuid4().hex[:12]}"
+        record = {
+            "id": run_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "mode": mode,
+            "agreement_type": agreement_type,
+            "document_title": document_title,
+            "skill_id": skill["id"] if skill else None,
+            "plugin": skill.get("plugin") if skill else None,
+            "playbook_injected": bool(skill and skill_registry.load_playbook(skill.get("plugin"))),
+            "web_search": web_search,
+            "model": self.settings.model,
+            "base_url": self.settings.base_url,
+            "offline": offline,
+            "status": status,
+            "latency_ms": latency_ms,
+            "context_chars": context_chars,
+            "response_chars": response_chars,
+            "requires_human_gate": mode in ASSESS_MODES,
+            "error": error,
+        }
+        try:
+            log_path = self.settings.ai_runs_log_path
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to write AI run audit log: {}", exc)
+        return run_id
+
+    def list_runs(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Return recent AI runs (newest first) from data/ai_runs.jsonl."""
+        log_path = self.settings.ai_runs_log_path
+        if not log_path.exists():
+            return []
+        rows: list[dict[str, Any]] = []
+        try:
+            for line in log_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to read AI run audit log: {}", exc)
+            return []
+        rows.reverse()
+        return rows[: max(1, min(limit, 200))]
 
     async def chat(
         self,
@@ -159,6 +258,7 @@ class CopilotService:
         skill_id: str | None = None,
         agreement_type: str | None = None,
     ) -> dict[str, Any]:
+        started = time.monotonic()
         web_research = await self._web_research(
             mode=mode,
             agreement_type=agreement_type,
@@ -185,11 +285,35 @@ class CopilotService:
             reply = self._offline_reply(
                 messages=messages, mode=mode, context=context, fields=fields or []
             )
-            reply.update(meta)
+            run_id = self._record_run(
+                mode=mode,
+                agreement_type=agreement_type,
+                document_title=document_title,
+                skill=skill,
+                web_search=bool(web_research),
+                offline=True,
+                status="offline",
+                latency_ms=int((time.monotonic() - started) * 1000),
+                context_chars=len(context),
+                response_chars=len(reply.get("content") or ""),
+            )
+            reply.update({**meta, "run_id": run_id})
             return reply
 
         try:
             content = await self._chat(system=system, context=context, messages=messages)
+            run_id = self._record_run(
+                mode=mode,
+                agreement_type=agreement_type,
+                document_title=document_title,
+                skill=skill,
+                web_search=bool(web_research),
+                offline=False,
+                status="completed",
+                latency_ms=int((time.monotonic() - started) * 1000),
+                context_chars=len(context),
+                response_chars=len(content),
+            )
             return {
                 "role": "assistant",
                 "content": content,
@@ -197,6 +321,7 @@ class CopilotService:
                 "model": self.settings.model,
                 "copilot_name": self.settings.copilot_name,
                 "offline": False,
+                "run_id": run_id,
                 **meta,
             }
         except Exception as exc:  # noqa: BLE001
@@ -206,7 +331,20 @@ class CopilotService:
             )
             fallback["content"] = f"(AI call failed: {exc})\n\n" + fallback["content"]
             fallback["error"] = str(exc)
-            fallback.update(meta)
+            run_id = self._record_run(
+                mode=mode,
+                agreement_type=agreement_type,
+                document_title=document_title,
+                skill=skill,
+                web_search=bool(web_research),
+                offline=True,
+                status="failed",
+                latency_ms=int((time.monotonic() - started) * 1000),
+                context_chars=len(context),
+                response_chars=len(fallback["content"]),
+                error=str(exc),
+            )
+            fallback.update({**meta, "run_id": run_id})
             return fallback
 
     async def chat_stream(
@@ -221,6 +359,7 @@ class CopilotService:
         agreement_type: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Yield event dicts: optional skill meta, then {delta}, then done is handled by router."""
+        started = time.monotonic()
         web_research = await self._web_research(
             mode=mode,
             agreement_type=agreement_type,
@@ -249,15 +388,54 @@ class CopilotService:
             offline = self._offline_reply(
                 messages=messages, mode=mode, context=context, fields=fields or []
             )
+            self._record_run(
+                mode=mode,
+                agreement_type=agreement_type,
+                document_title=document_title,
+                skill=skill,
+                web_search=bool(web_research),
+                offline=True,
+                status="offline",
+                latency_ms=int((time.monotonic() - started) * 1000),
+                context_chars=len(context),
+                response_chars=len(offline["content"]),
+            )
             yield {"delta": offline["content"]}
             return
 
+        total_chars = 0
         try:
             async for delta in self._chat_stream(system=system, context=context, messages=messages):
                 if delta:
+                    total_chars += len(delta)
                     yield {"delta": delta}
+            self._record_run(
+                mode=mode,
+                agreement_type=agreement_type,
+                document_title=document_title,
+                skill=skill,
+                web_search=bool(web_research),
+                offline=False,
+                status="completed",
+                latency_ms=int((time.monotonic() - started) * 1000),
+                context_chars=len(context),
+                response_chars=total_chars,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.exception("AI stream failed: {}", exc)
+            self._record_run(
+                mode=mode,
+                agreement_type=agreement_type,
+                document_title=document_title,
+                skill=skill,
+                web_search=bool(web_research),
+                offline=False,
+                status="failed",
+                latency_ms=int((time.monotonic() - started) * 1000),
+                context_chars=len(context),
+                response_chars=total_chars,
+                error=str(exc),
+            )
             yield {"delta": f"\n\n(AI stream failed: {exc})"}
 
     async def _chat(

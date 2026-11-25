@@ -1,0 +1,13 @@
+{
+  "id": "software-license-agreement-template",
+  "name": "Software License Agreement",
+  "category": "License Agreement",
+  "agreement_type": "License Agreement",
+  "description": "License Agreement template (9 yellow fields).",
+  "discovery": {
+    "bracket_highlights": 11,
+    "underscore_highlights": 0,
+    "ai_highlights": 0,
+    "field_count": 9
+  }
+}

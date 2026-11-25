@@ -1,0 +1,13 @@
+{
+  "id": "consulting-agreement-template-quicksigner",
+  "name": "Consultancy Agreement",
+  "category": "Consultancy Agreement",
+  "agreement_type": "Consultancy Agreement",
+  "description": "Consultancy Agreement template (45 yellow fields).",
+  "discovery": {
+    "bracket_highlights": 10,
+    "underscore_highlights": 10,
+    "ai_highlights": 30,
+    "field_count": 45
+  }
+}

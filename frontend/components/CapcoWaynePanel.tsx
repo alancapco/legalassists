@@ -12,6 +12,7 @@ export type CopilotField = {
   label: string;
   placeholder: string;
   value?: string;
+  sample_context?: string | null;
 };
 
 type Msg = { role: "user" | "assistant"; content: string };
@@ -124,6 +125,10 @@ type Props = {
   autoStartAssess?: boolean;
   onBrowseTemplates?: () => void;
   onUploadDocument?: () => void;
+  /** Run AI + structural field discovery on the live document and highlight fields in yellow. */
+  onDiscoverFields?: () => Promise<number>;
+  /** Save current workspace document as a reusable Template in the catalog (with AI field discovery). */
+  onSaveAsTemplate?: (name: string, category: string) => Promise<number>;
 };
 
 type ChatMode = "understand" | "improve" | "sources" | "review" | "assess" | "complete";
@@ -144,6 +149,8 @@ export function CapcoWaynePanel({
   autoStartAssess = false,
   onBrowseTemplates,
   onUploadDocument,
+  onDiscoverFields,
+  onSaveAsTemplate,
 }: Props) {
   const [panel, setPanel] = useState<PanelId>("wayne");
   const [wayneView, setWayneView] = useState<"chat" | "clauses">("chat");
@@ -158,6 +165,11 @@ export function CapcoWaynePanel({
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [discovering, setDiscovering] = useState(false);
+  const [savingTemplate, setSavingTemplate] = useState(false);
+  const [templateNameInput, setTemplateNameInput] = useState(title || "");
+  const [templateCategoryInput, setTemplateCategoryInput] = useState(agreementType || "Other");
+  const [templateBanner, setTemplateBanner] = useState<string | null>(null);
   const [activeSkill, setActiveSkill] = useState<{ id: string; name?: string } | null>(null);
   const [relatedOpen, setRelatedOpen] = useState(false);
   const [showStartChooser, setShowStartChooser] = useState(freshStart);
@@ -312,19 +324,25 @@ export function CapcoWaynePanel({
     const content = (text ?? input).trim();
     if (!content) return;
 
-    // Assessment must never fill the Word document. Do not treat "NDA" alone as complete.
+    // Assessment must never fill the Word document.
+    // When already in "complete" mode, do not let incidental words like "review" or "analyze"
+    // inside a user's project description hijack the mode into "assess".
+    const explicitAssessRequest =
+      /\b(assess\s+(?:this|the)\s+(?:contract|agreement|document|sow|nda|msa)|playbook\s+review|review\s+(?:this|the)\s+(?:contract|agreement|document|sow|nda|msa|clauses?)|green\s*\/?\s*yellow\s*\/?\s*red)\b/i.test(
+        content,
+      );
     const wantsAssess =
       modeOverride === "assess" ||
       modeOverride === "review" ||
       modeOverride === "understand" ||
       chatMode === "assess" ||
-      /\b(review|assess|analyse|analyze|triage|playbook|findings?|green|yellow|red)\b/i.test(
-        content,
-      );
+      explicitAssessRequest ||
+      (chatMode !== "complete" &&
+        /\b(review|assess|analyse|analyze|triage|playbook|findings?)\b/i.test(content));
     const wantsComplete =
       !wantsAssess &&
       (modeOverride === "complete" ||
-        /\b(complete|fill|yellow field|assign variable|one question at a time)\b/i.test(content) ||
+        /\b(complete|fill|yellow field|assign variable|one question at a time|draft|populate)\b/i.test(content) ||
         chatMode === "complete");
     const mode: ChatMode = modeOverride
       ? modeOverride === "review" || modeOverride === "understand"
@@ -350,7 +368,7 @@ export function CapcoWaynePanel({
     let totalApplied = 0;
     const appliedKeys = new Set<string>();
     let lastFieldsFence = "";
-    let usedSkill: { id: string; name?: string } | null = null;
+    let usedSkill = null as { id: string; name?: string } | null;
 
     const syncFieldsFromText = async (full: string) => {
       if (!mayWriteDocument) return;
@@ -374,9 +392,10 @@ export function CapcoWaynePanel({
         .map((f) => f.key)
         .join(", ");
       const guided = mayWriteDocument
-        ? `${content}\n\n[System: Emit a \`\`\`fields key: value\`\`\` block EARLY using exact keys, then keep talking. ` +
-          `Empty keys now: ${emptyKeys || "(none)"}. Ask one question for the next empty field. ` +
-          `Values sync into the live Word document as you stream.]`
+        ? `${content}\n\n[System: Emit a \`\`\`fields\nkey: value\n\`\`\` block FIRST using exact field keys. ` +
+          `Semantically map the user's situation to ALL matching fields (header metadata, scope, deliverables 1-3, timeline, responsibilities, assumptions, matching fee option, payment/acceptance terms, and signatory details if known). ` +
+          `Each field must be on a single line \`key: value\` matching its semantic role and clause context — NEVER put responsibilities, scope, or fees into signature or unrelated fields. ` +
+          `Empty keys now: ${emptyKeys || "(none)"}. After the \`\`\`fields block, briefly summarize what you filled and ask for the most important remaining details.]`
         : `${content}\n\n[System: ASSESSMENT MODE. Follow the Active Capco skill playbook loaded for you. ` +
           `Do NOT emit a \`\`\`fields block. Do NOT change document field values. ` +
           `Keep the Word document unchanged. Put GREEN/YELLOW/RED findings in chat only.]`;
@@ -396,6 +415,7 @@ export function CapcoWaynePanel({
             label: f.label,
             placeholder: f.placeholder,
             value: values[f.key] || "",
+            sample_context: f.sample_context || "",
           })),
         },
         (_delta, accumulated) => {
@@ -912,17 +932,46 @@ export function CapcoWaynePanel({
 
         {panel === "variables" && (
           <div className="wayne-panel__body">
-            <div className="wayne-panel__head">
+            <div className="wayne-panel__head" style={{ gap: "0.4rem", flexWrap: "wrap" }}>
               <h3>{"{…} Variables"}</h3>
-              <button
-                type="button"
-                className="btn btn--primary"
-                disabled={busy}
-                onClick={() => void assignVariables()}
-              >
-                Assign
-              </button>
+              <div style={{ display: "flex", gap: "0.4rem", marginLeft: "auto" }}>
+                {onDiscoverFields && (
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={busy || discovering}
+                    onClick={async () => {
+                      setDiscovering(true);
+                      setTemplateBanner(null);
+                      try {
+                        const count = await onDiscoverFields();
+                        setChatMode("complete");
+                        setTemplateBanner(`AI identified & highlighted ${count} fillable field(s).`);
+                      } catch (err) {
+                        setTemplateBanner(err instanceof Error ? err.message : "Field discovery failed");
+                      } finally {
+                        setDiscovering(false);
+                      }
+                    }}
+                  >
+                    {discovering ? "Scanning…" : "✨ AI Identify Fields"}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="btn btn--primary"
+                  disabled={busy}
+                  onClick={() => void assignVariables()}
+                >
+                  Assign
+                </button>
+              </div>
             </div>
+            {templateBanner && (
+              <p className="muted" style={{ color: "#1570ef", fontWeight: 500 }}>
+                {templateBanner}
+              </p>
+            )}
             <p className="muted">
               Yellow-highlighted placeholders from the Word template. Filling here tracks completion for Capco Wayne.
             </p>
@@ -943,7 +992,11 @@ export function CapcoWaynePanel({
                 />
               </div>
             ))}
-            {!fields.length && <p className="muted">No yellow fields detected in this document.</p>}
+            {!fields.length && (
+              <p className="muted">
+                No yellow fields detected yet. Click <strong>✨ AI Identify Fields</strong> above to scan the document for blanks, tables, and variables.
+              </p>
+            )}
           </div>
         )}
 
@@ -1068,7 +1121,7 @@ export function CapcoWaynePanel({
 
         {panel === "info" && (
           <div className="wayne-panel__body">
-            <h3>Info</h3>
+            <h3>Info &amp; Template Tools</h3>
             <p>
               <strong>Title:</strong> {title}
             </p>
@@ -1076,9 +1129,110 @@ export function CapcoWaynePanel({
               <strong>Type:</strong> {agreementType || "—"}
             </p>
             <p>
+              <strong>Detected Fields:</strong> {fields.length}
+            </p>
+            <p>
               <strong>Copilot:</strong> {copilotName}
             </p>
-            <p className="muted">
+
+            {onDiscoverFields && (
+              <div style={{ marginTop: "1rem", paddingTop: "0.75rem", borderTop: "1px solid var(--border, #e5e7eb)" }}>
+                <strong>AI Field Discovery</strong>
+                <p className="muted" style={{ fontSize: "0.82rem", margin: "0.35rem 0 0.6rem" }}>
+                  Scan the live Word document to identify blanks (____, $____, tables, brackets, or precedent values) and turn them into yellow fillable variables.
+                </p>
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={discovering}
+                  onClick={async () => {
+                    setDiscovering(true);
+                    setTemplateBanner(null);
+                    try {
+                      const count = await onDiscoverFields();
+                      setChatMode("complete");
+                      setTemplateBanner(`AI identified & highlighted ${count} fillable field(s).`);
+                    } catch (err) {
+                      setTemplateBanner(err instanceof Error ? err.message : "Discovery failed");
+                    } finally {
+                      setDiscovering(false);
+                    }
+                  }}
+                >
+                  {discovering ? "Scanning document with AI…" : "✨ AI Identify Fields"}
+                </button>
+              </div>
+            )}
+
+            {onSaveAsTemplate && (
+              <div style={{ marginTop: "1rem", paddingTop: "0.75rem", borderTop: "1px solid var(--border, #e5e7eb)" }}>
+                <strong>Save as Template</strong>
+                <p className="muted" style={{ fontSize: "0.82rem", margin: "0.35rem 0 0.6rem" }}>
+                  Save this document into the Template Catalog. Capco Wayne will automatically identify and yellow-highlight all fillable fields.
+                </p>
+                <div className="field" style={{ marginBottom: "0.6rem" }}>
+                  <label>Template Name</label>
+                  <input
+                    value={templateNameInput}
+                    onChange={(e) => setTemplateNameInput(e.target.value)}
+                    placeholder={title || "My Contract Template"}
+                  />
+                </div>
+                <div className="field" style={{ marginBottom: "0.6rem" }}>
+                  <label>Category</label>
+                  <select
+                    value={templateCategoryInput}
+                    onChange={(e) => setTemplateCategoryInput(e.target.value)}
+                  >
+                    {[
+                      "NDA",
+                      "MSA",
+                      "SOW",
+                      "Employment",
+                      "Vendor Agreement",
+                      "License Agreement",
+                      "DPA",
+                      "Consultancy Agreement",
+                      "Other",
+                    ].map((cat) => (
+                      <option key={cat} value={cat}>
+                        {cat}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn--primary"
+                  disabled={savingTemplate}
+                  onClick={async () => {
+                    setSavingTemplate(true);
+                    setTemplateBanner(null);
+                    try {
+                      const count = await onSaveAsTemplate(
+                        templateNameInput || title || "New Template",
+                        templateCategoryInput || agreementType || "Other",
+                      );
+                      setTemplateBanner(`Saved template with ${count} yellow field(s).`);
+                    } catch (err) {
+                      setTemplateBanner(err instanceof Error ? err.message : "Failed to save template");
+                    } finally {
+                      setSavingTemplate(false);
+                    }
+                  }}
+                >
+                  {savingTemplate ? "Analyzing & saving template…" : "Save as Template"}
+                </button>
+              </div>
+            )}
+
+            {templateBanner && (
+              <p className="muted" style={{ marginTop: "0.75rem", color: "#1570ef", fontWeight: 500 }}>
+                {templateBanner}
+              </p>
+            )}
+
+            <p className="muted" style={{ marginTop: "1rem" }}>
               Outputs are drafts for attorney review — not legal advice. GREEN signature paths require a human gate.
             </p>
           </div>

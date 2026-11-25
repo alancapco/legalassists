@@ -1,0 +1,13 @@
+{
+  "id": "engineer-employment-agreement",
+  "name": "ML Engineer Employment",
+  "category": "Employment",
+  "agreement_type": "Employment",
+  "description": "Uploaded Employment template. 28 yellow fields detected (AI + blank analysis).",
+  "discovery": {
+    "bracket_highlights": 33,
+    "underscore_highlights": 0,
+    "ai_highlights": 0,
+    "field_count": 28
+  }
+}

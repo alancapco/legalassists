@@ -1,5 +1,6 @@
-"""Document upload + editor payload APIs."""
+"""Document upload + editor payload + live AI field discovery APIs."""
 
+import base64
 from pathlib import Path
 from uuid import uuid4
 
@@ -11,6 +12,7 @@ from app.config import get_settings
 from app.services.catalog import catalog
 from app.services.documents import document_store
 from app.services.editor_content import docx_to_blocks
+from app.services.field_discovery import prepare_template_fields
 from app.services.yellow_fields import fill_docx
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -24,7 +26,17 @@ class FillFieldsRequest(BaseModel):
     values: dict[str, str] = Field(default_factory=dict)
     template_id: str | None = None
     document_id: str | None = None
+    docx_base64: str | None = None
     clear_highlight: bool = False
+
+
+class DiscoverFieldsRequest(BaseModel):
+    """Run intelligent AI + structural field discovery on a workspace document or template."""
+
+    template_id: str | None = None
+    document_id: str | None = None
+    docx_base64: str | None = None
+    use_ai: bool = True
 
 
 @router.get("")
@@ -38,12 +50,70 @@ async def list_documents() -> list[dict]:
 @router.post("/upload")
 async def upload_document(
     file: UploadFile = File(...),
-    mode: str = "review",
+    mode: str = "complete",
 ) -> dict:
     try:
         return await document_store.save_upload(file, mode=mode)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/discover-fields")
+async def discover_fields(body: DiscoverFieldsRequest) -> dict:
+    """Identify and yellow-highlight fillable fields in a template or live workspace document."""
+    settings = get_settings()
+    target: Path | None = None
+    cleanup_temp = False
+
+    if body.template_id:
+        template = catalog.get(body.template_id)
+        if not template:
+            raise HTTPException(status_code=404, detail="Template not found")
+        target = Path(template.source_path)
+    elif body.document_id:
+        doc = document_store.get(body.document_id)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+        target = Path(doc["path"])
+    elif body.docx_base64:
+        out_dir = settings.data_dir / "filled"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        target = out_dir / f"discover_{uuid4().hex}.docx"
+        cleanup_temp = True
+    else:
+        raise HTTPException(status_code=400, detail="template_id, document_id, or docx_base64 required")
+
+    if body.docx_base64:
+        try:
+            raw_bytes = base64.b64decode(body.docx_base64)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail="Invalid docx_base64") from exc
+        if raw_bytes:
+            target.write_bytes(raw_bytes)
+
+    if not target or not target.exists():
+        raise HTTPException(status_code=404, detail="Source .docx missing")
+
+    try:
+        discovery = await prepare_template_fields(target, use_ai=body.use_ai)
+        editor = docx_to_blocks(target)
+        updated_bytes = target.read_bytes()
+        if body.template_id:
+            catalog.refresh()
+        elif body.document_id:
+            document_store.refresh_from_disk(body.document_id)
+    finally:
+        if cleanup_temp and target and target.exists():
+            target.unlink(missing_ok=True)  # type: ignore[arg-type]
+
+    return {
+        "field_count": len(editor.get("fields") or []),
+        "fields": editor.get("fields") or [],
+        "plain_text": editor.get("plain_text") or "",
+        "blocks": editor.get("blocks") or [],
+        "discovery": discovery,
+        "docx_base64": base64.b64encode(updated_bytes).decode("ascii"),
+    }
 
 
 @router.post("/fill-fields")
@@ -52,7 +122,12 @@ async def fill_fields(body: FillFieldsRequest) -> Response:
     if not body.values:
         raise HTTPException(status_code=400, detail="No values provided")
 
+    settings = get_settings()
+    out_dir = settings.data_dir / "filled"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     source: Path | None = None
+    temp_source: Path | None = None
     if body.template_id:
         template = catalog.get(body.template_id)
         if not template:
@@ -63,15 +138,20 @@ async def fill_fields(body: FillFieldsRequest) -> Response:
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
         source = Path(doc["path"])
+    elif body.docx_base64:
+        try:
+            raw_bytes = base64.b64decode(body.docx_base64)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail="Invalid docx_base64") from exc
+        temp_source = out_dir / f"src_{uuid4().hex}.docx"
+        temp_source.write_bytes(raw_bytes)
+        source = temp_source
     else:
-        raise HTTPException(status_code=400, detail="template_id or document_id required")
+        raise HTTPException(status_code=400, detail="template_id, document_id, or docx_base64 required")
 
     if not source or not source.exists():
         raise HTTPException(status_code=404, detail="Source .docx missing")
 
-    settings = get_settings()
-    out_dir = settings.data_dir / "filled"
-    out_dir.mkdir(parents=True, exist_ok=True)
     dest = out_dir / f"fill_{uuid4().hex}.docx"
     try:
         fill_docx(source, dest, body.values, clear_highlight=body.clear_highlight)
@@ -79,6 +159,8 @@ async def fill_fields(body: FillFieldsRequest) -> Response:
     finally:
         if dest.exists():
             dest.unlink(missing_ok=True)  # type: ignore[arg-type]
+        if temp_source and temp_source.exists():
+            temp_source.unlink(missing_ok=True)  # type: ignore[arg-type]
 
     return Response(
         content=data,
